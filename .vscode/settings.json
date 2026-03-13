@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd 'c:\\\\Users\\\\YOGA X390\\\\Downloads\\\\milk-farm-management-master \\(4\\)' ; npx firebase-tools --version$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

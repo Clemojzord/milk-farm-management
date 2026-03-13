@@ -1,0 +1,24 @@
+{
+  "name": "milk-farm-management",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "chart.js": "^4.4.0",
+    "file-saver": "^2.0.5",
+    "firebase": "^12.9.0",
+    "react": "^18.2.0",
+    "react-chartjs-2": "^5.2.0",
+    "react-csv": "^2.2.2",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.4",
+    "vite": "^7.3.1"
+  }
+}
