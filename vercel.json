@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "milk-farm-management-master/package.json",
+      "use": "@vercel/static-build",
+      "config": { "distDir": "dist" }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "milk-farm-management-master/dist/$1"
+    }
+  ]
+}
