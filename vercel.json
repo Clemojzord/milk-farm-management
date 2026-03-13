@@ -8,9 +8,10 @@
     }
   ],
   "routes": [
+    { "handle": "filesystem" },
     {
       "src": "/(.*)",
-      "dest": "milk-farm-management-master/dist/$1"
+      "dest": "milk-farm-management-master/dist/index.html"
     }
   ]
 }
