@@ -74,10 +74,19 @@ async function request(path, options = {}) {
   });
 
   const raw = await response.text();
-  const payload = raw ? JSON.parse(raw) : null;
+  let payload = null;
+
+  if (raw) {
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      // Not JSON (e.g., HTML error page). Preserve raw text for debugging.
+      payload = { _raw: raw };
+    }
+  }
 
   if (!response.ok) {
-    const message = payload?.error || `Request failed with status ${response.status}`;
+    const message = payload?.error || payload?._raw || `Request failed with status ${response.status}`;
     throw new ApiError(message, response.status, payload);
   }
 
