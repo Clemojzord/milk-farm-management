@@ -1,7 +1,20 @@
 const http = require('node:http');
 const { randomUUID, randomBytes, pbkdf2Sync, timingSafeEqual } = require('node:crypto');
 const fs = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
+
+const {
+  shouldUsePostgres,
+  ensureAuthRow,
+  ensureLocalJsonFile,
+  ensureStateRow,
+  getLocalDataDir,
+  readAuthPostgres,
+  readStatePostgres,
+  writeStatePostgres,
+} = require('./persistence');
+const { createSessionStore } = require('./session-store');
 
 const HOST = process.env.API_HOST || '0.0.0.0';
 const PORT = Number(process.env.API_PORT || 4000);
@@ -21,7 +34,7 @@ const READ_ROLES = [ROLE_ADMIN, ROLE_ACCOUNTANT, ROLE_VIEWER];
 const FINANCE_WRITE_ROLES = [ROLE_ADMIN, ROLE_ACCOUNTANT];
 const ADMIN_ROLES = [ROLE_ADMIN];
 
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = getLocalDataDir();
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const AUTH_FILE = path.join(DATA_DIR, 'auth.json');
 
@@ -46,7 +59,7 @@ const DEFAULT_USERS = [
   },
 ];
 
-const sessions = new Map();
+const sessionStore = createSessionStore();
 
 function createHttpError(statusCode, message) {
   const error = new Error(message);
@@ -289,19 +302,19 @@ function normalizeAuthStore(raw) {
 }
 
 async function ensureStateFile() {
-  try {
-    await fs.access(STATE_FILE);
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
-
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    await fs.writeFile(STATE_FILE, JSON.stringify(createEmptyState(), null, 2), 'utf8');
+  if (shouldUsePostgres()) {
+    await ensureStateRow({ createEmptyState });
+    return;
   }
+
+  await ensureLocalJsonFile(STATE_FILE, createEmptyState());
 }
 
 async function ensureAuthFile() {
+  if (shouldUsePostgres()) {
+    return ensureAuthRow({ createDefaultAuthStore });
+  }
+
   try {
     await fs.access(AUTH_FILE);
     return { created: false };
@@ -318,6 +331,10 @@ async function ensureAuthFile() {
 }
 
 async function readState() {
+  if (shouldUsePostgres()) {
+    return readStatePostgres({ normalizeState, createEmptyState });
+  }
+
   await ensureStateFile();
 
   const raw = await fs.readFile(STATE_FILE, 'utf8');
@@ -329,6 +346,10 @@ async function readState() {
 }
 
 async function writeState(state) {
+  if (shouldUsePostgres()) {
+    return writeStatePostgres({ normalizeState }, state);
+  }
+
   const next = normalizeState(state);
   next.updatedAt = new Date().toISOString();
 
@@ -339,6 +360,10 @@ async function writeState(state) {
 }
 
 async function readAuthStore() {
+  if (shouldUsePostgres()) {
+    return readAuthPostgres({ normalizeAuthStore, createDefaultAuthStore });
+  }
+
   await ensureAuthFile();
 
   const raw = await fs.readFile(AUTH_FILE, 'utf8');
@@ -349,39 +374,9 @@ async function readAuthStore() {
   }
 }
 
-function createSession(userId) {
-  const token = randomBytes(48).toString('hex');
-  const now = Date.now();
-
-  sessions.set(token, {
-    userId,
-    issuedAt: now,
-    expiresAt: now + SESSION_TTL_MS,
-  });
-
+async function createSession(userId) {
+  const { token } = await sessionStore.create(userId, SESSION_TTL_MS);
   return token;
-}
-
-function clearExpiredSessions() {
-  const now = Date.now();
-  for (const [token, session] of sessions.entries()) {
-    if (!session || session.expiresAt <= now) {
-      sessions.delete(token);
-    }
-  }
-}
-
-function getSession(token) {
-  if (!token) return null;
-  const session = sessions.get(token);
-  if (!session) return null;
-
-  if (session.expiresAt <= Date.now()) {
-    sessions.delete(token);
-    return null;
-  }
-
-  return session;
 }
 
 function parseBearerToken(req) {
@@ -402,7 +397,7 @@ async function requireAuth(req) {
     throw createHttpError(401, 'Missing bearer token');
   }
 
-  const session = getSession(token);
+  const session = await sessionStore.get(token);
   if (!session) {
     throw createHttpError(401, 'Invalid or expired session');
   }
@@ -411,7 +406,7 @@ async function requireAuth(req) {
   const user = authStore.users.find((entry) => String(entry.id) === String(session.userId));
 
   if (!user) {
-    sessions.delete(token);
+    await sessionStore.destroy(token);
     throw createHttpError(401, 'Session user not found');
   }
 
@@ -543,7 +538,7 @@ async function handleAuth(req, res, pathname, authContext) {
       throw createHttpError(401, 'Invalid username or password');
     }
 
-    const token = createSession(user.id);
+    const token = await createSession(user.id);
 
     return sendJson(res, 200, {
       data: {
@@ -575,7 +570,7 @@ async function handleAuth(req, res, pathname, authContext) {
       throw createHttpError(401, 'Authentication required');
     }
 
-    sessions.delete(authContext.token);
+    await sessionStore.destroy(authContext.token);
     return sendNoContent(res);
   }
 
@@ -958,35 +953,43 @@ async function requestRouter(req, res) {
   throw createHttpError(404, 'Route not found');
 }
 
-async function bootstrap() {
+let initPromise = null;
+
+async function init() {
   await ensureStateFile();
   const authSetup = await ensureAuthFile();
 
-  clearExpiredSessions();
-  const cleanupTimer = setInterval(clearExpiredSessions, 1000 * 60 * 10);
-  if (typeof cleanupTimer.unref === 'function') {
-    cleanupTimer.unref();
-  }
-
-  if (authSetup.created) {
+  if (authSetup.created && !process.env.VERCEL) {
     console.log('[milk-farm-api] auth store created with default users:');
     console.log(`- admin: ${DEFAULT_USERS[0].username} / ${DEFAULT_USERS[0].password}`);
     console.log(`- accountant: ${DEFAULT_USERS[1].username} / ${DEFAULT_USERS[1].password}`);
     console.log(`- viewer: ${DEFAULT_USERS[2].username} / ${DEFAULT_USERS[2].password}`);
     console.log('[milk-farm-api] change these credentials in backend/data/auth.json for production usage.');
   }
+}
 
+async function handle(req, res) {
+  if (!initPromise) {
+    initPromise = init();
+  }
+
+  await initPromise;
+
+  return requestRouter(req, res).catch((error) => {
+    const statusCode = Number(error.statusCode) || 500;
+    const message = statusCode >= 500 ? 'Internal server error' : error.message;
+
+    if (statusCode >= 500) {
+      console.error('Unhandled API error:', error);
+    }
+
+    return sendJson(res, statusCode, { error: message });
+  });
+}
+
+function startServer() {
   const server = http.createServer((req, res) => {
-    requestRouter(req, res).catch((error) => {
-      const statusCode = Number(error.statusCode) || 500;
-      const message = statusCode >= 500 ? 'Internal server error' : error.message;
-
-      if (statusCode >= 500) {
-        console.error('Unhandled API error:', error);
-      }
-
-      sendJson(res, statusCode, { error: message });
-    });
+    handle(req, res);
   });
 
   server.listen(PORT, HOST, () => {
@@ -998,7 +1001,13 @@ async function bootstrap() {
   });
 }
 
-bootstrap().catch((error) => {
-  console.error('[milk-farm-api] failed to start', error);
-  process.exit(1);
-});
+module.exports = { handle, startServer };
+
+if (require.main === module && !process.env.VERCEL) {
+  Promise.resolve()
+    .then(() => startServer())
+    .catch((error) => {
+      console.error('[milk-farm-api] failed to start', error);
+      process.exit(1);
+    });
+}
