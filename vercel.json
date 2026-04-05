@@ -1,5 +1,6 @@
 {
   "framework": null,
+  "installCommand": "npm install --prefix ./milk-farm-management-master",
   "buildCommand": "npm run build:web",
   "outputDirectory": "milk-farm-management-master/dist",
   "rewrites": [
